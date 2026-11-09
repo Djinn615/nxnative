@@ -2,10 +2,13 @@
 with the .NET it is given, a missing glslangValidator, and a Python under Rosetta each stop the build at once instead of at a shader step minutes later.
 Every input (xcrun, xcode-select, sysctl, the translator, PATH) is mocked: no Xcode, .NET, glslang or Rosetta needed."""
 import importlib.util
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -32,11 +35,34 @@ def fake_run(sdk_rc=0, devdir='/Applications/Xcode.app/Contents/Developer', xlat
     return run
 
 
+def fake_capstone(major):   # the installed capstone's version does not matter to these tests
+    return types.SimpleNamespace(__version__=f'{major}.0.0', cs_version=lambda: (major, 0, major << 8))
+
+
+class ToolPath(unittest.TestCase):   # issue #1474: TOOL_PATHS are fallbacks, so the tools the caller's PATH selects are the ones that run
+    def test_caller_tools_win_and_fallbacks_find_the_rest(self):
+        with tempfile.TemporaryDirectory() as folder:
+            caller, fallback = Path(folder) / 'Project Tools', Path(folder) / 'fallback'   # a space in the caller's folder
+            for directory, names in ((caller, ('zstd', 'dotnet')), (fallback, ('zstd', 'dotnet', 'xcodegen'))):
+                directory.mkdir()
+                for name in names: tool = directory / name; tool.write_text('#!/bin/sh\n'); tool.chmod(0o755)
+            with mock.patch.object(nsp, 'TOOL_PATHS', [str(fallback)]):
+                env = nsp.tool_env({'PATH': str(caller), 'HOME': '/h'})
+            self.assertEqual(env, {'PATH': os.pathsep.join([str(caller), str(fallback)]), 'HOME': '/h'})
+            for name in ('zstd', 'dotnet'): self.assertEqual(shutil.which(name, path=env['PATH']), str(caller / name))
+            self.assertEqual(shutil.which('xcodegen', path=env['PATH']), str(fallback / 'xcodegen'))
+
+    def test_no_path_takes_the_system_path(self):   # unset or empty: an empty PATH entry would search the current folder
+        for environ in ({}, {'PATH': ''}):
+            with self.subTest(environ=environ), mock.patch.object(nsp, 'TOOL_PATHS', ['/fallback']):
+                self.assertEqual(nsp.tool_env(environ)['PATH'], '/usr/bin:/bin:/usr/sbin:/sbin:/fallback')
+
+
 class Prereqs(unittest.TestCase):
-    def check(self, mac=False, which=lambda *a, **k: '/x', **kw):
+    def check(self, mac=False, which=lambda *a, **k: '/x', capstone=5, **kw):
         calls = []
         with tempfile.TemporaryDirectory() as d, mock.patch.object(nsp, '_importable', lambda m: True), mock.patch.object(nsp.shutil, 'which', which), \
-                mock.patch.object(nsp.subprocess, 'run', fake_run(calls=calls, **kw)):
+                mock.patch.object(nsp.subprocess, 'run', fake_run(calls=calls, **kw)), mock.patch.dict(sys.modules, capstone=fake_capstone(capstone)):
             xlate = Path(d) / 'dmsh_xlate'; xlate.write_text('')
             try: nsp.check_prereqs({'PATH': '/usr/bin', 'DOTNET_ROOT': '/stale'}, xlate, mac)
             finally: self.calls = calls
@@ -70,6 +96,19 @@ class Prereqs(unittest.TestCase):
 
     def test_glslang_is_a_prerequisite(self):   # README installs it; an OpenGL game would otherwise stop only after its run-time capture
         with self.assertRaisesRegex(nsp.BuildError, r'glslangValidator \(brew install glslang\)'): self.check(which=lambda t, **k: None if t == 'glslangValidator' else '/x')
+
+    def test_zbic_is_a_prerequisite(self):   # README installs it; a game with ZBIC modules would otherwise stop only at the rewrite, after its whole RomFS is unpacked (Ocarina of Time: 23 minutes)
+        with mock.patch.object(nsp, '_importable', lambda m: m != 'zbic'), self.assertRaisesRegex(nsp.BuildError, r'missing modules: zbic \(pip install .*zbic'):
+            nsp.check_prereqs({'PATH': '/usr/bin'}, Path('/nonexistent'), True)
+
+    def test_capstone_5_passes(self):
+        with mock.patch.dict(sys.modules, capstone=fake_capstone(5)): nsp.check_capstone()
+
+    def test_other_capstone_stops_with_the_install_command(self):   # Capstone 6 renamed CS_ARCH_ARM64 and the operand constants patch_nso.py uses
+        for major in (4, 6):
+            with self.subTest(major=major), mock.patch.dict(sys.modules, capstone=fake_capstone(major)):
+                with self.assertRaisesRegex(nsp.BuildError, rf'Capstone {major}\.0\.0 is unsupported.*-m pip install .capstone>=5,<6'): nsp.check_capstone()
+        with self.assertRaisesRegex(nsp.BuildError, 'Capstone 6'): self.check(capstone=6, which=lambda *a, **k: None)   # before the tools and the Metal check
 
 
 class Rosetta(unittest.TestCase):
