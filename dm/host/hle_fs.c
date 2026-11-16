@@ -340,15 +340,25 @@ static const dir_index *dir_index_get(const char *dir) {
     x->hash = h; x->n = n; x->pool = pool; x->next = *slot; *slot = x;
     return x;
 }
+// Append /physical. A symlink is not followed: open and opendir would read or write its target, so a name planted in a save or a RomFS folder could point at a host file.
+// create is set only for a last component that may not exist yet; an existing symlink then answers "already exists", as O_EXCL would.
+static int append_physical(char *parent, size_t n, const char *physical, int create) {
+    size_t len = strlen(parent), k = strlen(physical);
+    if (len + k + 2 > n || len + k + 2 > 1280) { errno = ENAMETOOLONG; return 0; }
+    char probe[1280];
+    memcpy(probe, parent, len); probe[len] = '/'; memcpy(probe + len + 1, physical, k + 1);
+    struct stat st;
+    if (lstat(probe, &st)) { if (!create || errno != ENOENT) return 0; }
+    else if (S_ISLNK(st.st_mode)) { errno = create ? EEXIST : ELOOP; return 0; }
+    memcpy(parent + len, probe + len, k + 2); return 1;
+}
 static int path_component(char *parent, size_t n, const char *name, int create, int ro) {
     if (ro && !create) {
         const dir_index *x = dir_index_get(parent);
         if (x) {
             name_ent key = {name, NULL}; const name_ent *hit = bsearch(&key, x->e, x->n, sizeof *x->e, name_ent_cmp);
             if (!hit) { errno = ENOENT; return 0; }
-            size_t len = strlen(parent), k = strlen(hit->phys);
-            if (len + k + 2 > n) { errno = ENAMETOOLONG; return 0; }
-            parent[len] = '/'; memcpy(parent + len + 1, hit->phys, k + 1); return 1;
+            return append_physical(parent, n, hit->phys, 0);
         }
     }
     DIR *d = opendir(parent); if (!d) return 0;
@@ -371,9 +381,7 @@ static int path_component(char *parent, size_t n, const char *name, int create, 
         }
         if (errno != ENOENT) return 0;
     }
-    size_t len = strlen(parent), k = strlen(physical);
-    if (len + k + 2 > n) { errno = ENAMETOOLONG; return 0; }
-    parent[len] = '/'; memcpy(parent + len + 1, physical, k + 1); return 1;
+    return append_physical(parent, n, physical, create);
 }
 static int root_path(const char *root, const char *rest, char *out, size_t n) {
     strlcpy(out, root, n);
@@ -848,7 +856,8 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
     }
     HP(path);
     if (mode & (MODE_WRITE | MODE_APPEND)) RW();
-    int fd = open(hp, (mode & (MODE_WRITE | MODE_APPEND)) ? ((mode & MODE_READ) ? O_RDWR : O_WRONLY) : O_RDONLY);
+    int flags = (mode & (MODE_WRITE | MODE_APPEND)) ? ((mode & MODE_READ) ? O_RDWR : O_WRONLY) : O_RDONLY;
+    int fd = open(hp, flags | O_NOFOLLOW);   // the last component too: path_component already refuses a symlink, and a name swapped for one in between must not be followed
     if (fd < 0) return err_res("open", hp);
     struct stat st; fstat(fd, &st);
     if (S_ISDIR(st.st_mode)) { close(fd); return RES_PATH_NOT_FOUND; }
@@ -951,7 +960,7 @@ HLE_FORCE("_ZN2nn2fs15GetFileOpenModeENS0_10FileHandleE", "fsp-srv; the open mod
 HLE_FORCE("_ZN2nn2fs10CreateFileEPKcl", "fsp-srv → open(O_CREAT|O_EXCL)+ftruncate", Result, h_fs_CreateFile, const char *path, int64_t sz) { dm_thread_service_request();
     int mi; int64_t k; if (img_path(path, &mi, &k)) return k >= 0 ? RES_PATH_EXISTS : RES_FAIL;   // as RW_CREATE answers on a read-only folder
     HP_EX(path, 1); RW_CREATE();
-    int fd = open(hp, O_WRONLY | O_CREAT | O_EXCL, 0644);
+    int fd = open(hp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0644);
     if (fd < 0) return err_res("create", hp);
     int rc = ftruncate(fd, sz); int e = errno; close(fd);
     if (!rc && set_guest_name(hp, path)) { rc = -1; e = errno; }

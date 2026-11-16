@@ -33,7 +33,9 @@ def children(path):
     out = []
     with os.scandir(path) as it:
         for e in it:
-            out.append((guest(path, e.name).encode(), e.path, e.is_dir(follow_symlinks=True)))
+            # A dump is untrusted input. Followed links would copy host files (or a whole directory) into the image.
+            if e.is_symlink(): raise RuntimeError(f'{e.path} is a symlink; RomFS packing does not follow links')
+            out.append((guest(path, e.name).encode(), e.path, e.is_dir(follow_symlinks=False)))
     out.sort()
     return out
 
@@ -106,8 +108,11 @@ def publish(part, dst, digest):   # the written image in place, with its stamp
 
 
 def copy_file(path, out):
-    n = 0
-    with open(path, 'rb') as f:
+    """Copy one file. O_NOFOLLOW closes the gap after children() rejected a symlink and before this open."""
+    n, flags = 0, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+    try: fd = os.open(path, flags)
+    except OSError as e: raise RuntimeError(f'{path}: {e.strerror}') from e
+    with os.fdopen(fd, 'rb') as f:
         while b := f.read(8 << 20): out.write(b); n += len(b)
     return n
 
@@ -117,7 +122,11 @@ def pack(src, dst, reuse=False):
     ents = entries(src)
     digest = source_digest(src, ents)
     if reuse and reusable(dst, digest): return len(ents)
-    part = write(ents, dst, copy_file)
+    try: part = write(ents, dst, copy_file)
+    except BaseException:
+        try: os.unlink(dst + '.part')
+        except OSError: pass
+        raise
     # A changing source must not publish a mixed image or a reuse stamp for stale data.
     if source_digest(src, entries(src)) != digest:
         os.unlink(part)

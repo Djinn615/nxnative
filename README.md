@@ -39,6 +39,8 @@ brew install --cask dotnet-sdk
 python3 -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic "backports.zstd; python_version < '3.14'"
 ```
 
+Those packages, pinned, are in [`.github/requirements/tools.txt`](.github/requirements/tools.txt), which is also what the venv in [development](docs/development.md) installs. It adds the libraries the other tools import. `backports.zstd` is only for Python before 3.14 (`compression.zstd` is part of 3.14); the `zstandard` package is a different module.
+
 **2. Put your game in a folder**: the game, plus its update and DLC if you have them (`.nsp`, `.xci`, `.nsz` or `.xcz`):
 
 ```

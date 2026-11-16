@@ -1,0 +1,12 @@
+# The workflows pin Actions to commit SHAs and say Dependabot can raise them. This is that config.
+# pip covers the pinned requirement files under .github/requirements (lint, tests, fuzz, and the game venv).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: pip
+    directory: /.github/requirements
+    schedule:
+      interval: weekly

@@ -457,17 +457,44 @@ static class P {
         }
     }
 
+    // An archive path joined under root. LibHac FullPath starts with '/'; that slash is the archive root, not the host root.
+    // ".." , a drive prefix, or a NUL would make Path.Combine write or read outside root (ExeFS is always expanded; --html and a legacy RomFS folder are too).
+    internal static string SafeRelative(string relative, bool allowRoot = false) {
+        if (relative == null || relative.IndexOfAny(new[] { '\0', '\n', '\r', '\t' }) >= 0)
+            throw new IOException("refusing an empty or unsafe archive path");
+        string rel = relative.Replace('\\', '/').Trim('/');
+        if (rel.Length == 0) {   // "/" is the archive root, which enumeration may report as a directory
+            if (allowRoot) return "";
+            throw new IOException("refusing an empty archive path");
+        }
+        foreach (string part in rel.Split('/')) {
+            if (part.Length == 0 || part == "." || part == ".." || part.IndexOf(':') >= 0)
+                throw new IOException($"refusing archive path {relative}");
+        }
+        return rel;
+    }
+    internal static string SafeChild(string root, string relative, bool allowRoot = false) {
+        string rel = SafeRelative(relative, allowRoot);
+        string rootFull = Path.GetFullPath(root);
+        if (rel.Length == 0) return rootFull;
+        string full = Path.GetFullPath(Path.Combine(rootFull, rel));
+        string prefix = rootFull.EndsWith(Path.DirectorySeparatorChar) ? rootFull : rootFull + Path.DirectorySeparatorChar;
+        if (!full.StartsWith(prefix, StringComparison.Ordinal)) throw new IOException($"refusing archive path {relative}");
+        return full;
+    }
+
     // Copy out file by file; files identical to the same path in the compare dir become APFS clones instead
     static void Copy(Func<IFileSystem> open, string dst, string cmpDir) {
         IFileSystem fs = open();
         long n = 0, cloned = 0, bytes = 0, written = 0; byte[] buf = new byte[4 << 20], cb = new byte[4 << 20];
         foreach (DirectoryEntryEx e in fs.EnumerateEntries("*", SearchOptions.RecurseSubdirectories)) {
-            string rel = e.FullPath.TrimStart('/'), op = Path.Combine(dst, rel);
-            if (e.Type == DirectoryEntryType.Directory) { Directory.CreateDirectory(op); continue; }
+            bool dir = e.Type == DirectoryEntryType.Directory;
+            string op = SafeChild(dst, e.FullPath, dir);
+            if (dir) { Directory.CreateDirectory(op); continue; }
             Directory.CreateDirectory(Path.GetDirectoryName(op)); n++; bytes += e.Size;
             using var f = new UniqueRef<IFile>();
             fs.OpenFile(ref f.Ref, e.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
-            string cp = cmpDir == null ? null : Path.Combine(cmpDir, rel);
+            string cp = cmpDir == null ? null : SafeChild(cmpDir, e.FullPath);
             try {
                 if (cp != null && File.Exists(cp) && new FileInfo(cp).Length == e.Size && Same(f.Get, cp, e.Size, buf, cb)) {
                     if (File.Exists(op)) File.Delete(op);
@@ -510,10 +537,11 @@ static class P {
             long got = 0; int want = (int)Math.Min(h.Length, e.Size);
             try { if (want > 0) f.Get.Read(out got, 0, h.AsSpan(0, want), ReadOption.None).ThrowIfFailure(); }
             catch (HorizonResultException x) when (HashError(x)) { fs = Failed(e.FullPath, open); got = 0; }   // the survey goes on; the file is listed as damaged
+            SafeRelative(e.FullPath);   // the line is the archive path; a tab or ".." must not be written out as a host path below
             o.WriteLine($"{e.FullPath}\t{e.Size}\t{Convert.ToHexString(h, 0, (int)got).ToLowerInvariant()}");
             n++; bytes += e.Size;
             if (got == want && e.FullPath.EndsWith(".nro", StringComparison.OrdinalIgnoreCase)) {
-                string op = Path.Combine(Path.GetDirectoryName(path), "romfs_nro", e.FullPath.TrimStart('/'));
+                string op = SafeChild(Path.Combine(Path.GetDirectoryName(path), "romfs_nro"), e.FullPath);
                 Directory.CreateDirectory(Path.GetDirectoryName(op));
                 try { Write(f.Get, op, e.Size, new byte[4 << 20]); } catch (HorizonResultException x) when (HashError(x)) { fs = Failed(e.FullPath, open); File.Delete(op); }
             }

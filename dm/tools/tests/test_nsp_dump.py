@@ -116,6 +116,16 @@ class Pack(Base):
         self.assertIn('dir/new', names)
         self.assertNotIn('dir/old', names)   # an update's RomFS is the patched tree, never laid over the base
 
+    def test_exefs_symlink_is_not_copied(self):
+        src = self.dump / f'updates/{VER}'
+        secret = self.dump / 'secret'
+        secret.write_bytes(b'secret')
+        main = src / 'exefs/main'
+        main.unlink(); main.symlink_to(secret)
+        with self.assertRaisesRegex(pack_dump.Error, 'symlink'): pack_dump.pack_version(src, TID, self.out(), say=lambda s: None)
+        self.assertFalse((self.out() / 'ExeFS/main').exists())
+        self.assertEqual(secret.read_bytes(), b'secret')
+
     def test_other_title_refused(self):
         with self.assertRaisesRegex(pack_dump.Error, 'the base is'): pack_dump.pack_version(self.dump / f'updates/{VER}', TID + 0x2000, self.out(), say=lambda s: None)
 

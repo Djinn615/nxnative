@@ -16,7 +16,7 @@
 # A dump has no control data, so there is no control.nacp or icon.jpg beside them, as there is after nx_extract.
 # The title ID is the program ID in main.npdm. A repeat run keeps code modules that are the same and an image whose source tree, packer and image are unchanged (romfs_image.py --reuse).
 # Usage: pack_dump.py <dump folder> [--version N] [--work-dir DIR]   (exit 1 on error)
-import argparse, filecmp, shutil, struct, subprocess, sys
+import argparse, filecmp, os, shutil, struct, subprocess, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'dm/tools'))
 import romfs_image
@@ -33,12 +33,17 @@ def program_id(npdm):   # the ACI0 program ID of main.npdm
     return struct.unpack_from('<Q', d, off + 0x10)[0]
 
 
-def clone(src, dst):   # an APFS clone on the same volume, else a copy
-    if subprocess.run(['cp', '-c', src, dst], capture_output=True).returncode != 0: shutil.copy2(src, dst)
+def clone(src, dst):   # an APFS clone on the same volume, else a copy. "--" so a file whose name starts with "-" is not a cp flag
+    src, dst = os.fspath(src), os.fspath(dst)
+    if subprocess.run(['cp', '-c', '--', src, dst], capture_output=True).returncode != 0: shutil.copy2(src, dst, follow_symlinks=False)
 
 
 def exefs(src, dst):
-    files = sorted(f for f in src.iterdir() if f.is_file() and not f.name.startswith('.'))
+    files = []
+    for f in sorted(src.iterdir(), key=lambda p: p.name):
+        if f.name.startswith('.'): continue
+        if f.is_symlink(): raise Error(f'{f} is a symlink; ExeFS packing does not follow links')
+        if f.is_file(): files.append(f)
     if dst.is_dir() and {f.name for f in files} == {f.name for f in dst.iterdir()} and all(filecmp.cmp(f, dst / f.name, shallow=False) for f in files): return
     tmp = dst.with_name(dst.name + '.partial')
     shutil.rmtree(tmp, ignore_errors=True); tmp.mkdir(parents=True)

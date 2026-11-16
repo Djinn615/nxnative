@@ -37,6 +37,20 @@ class Images(unittest.TestCase):
         self.src = self.root / 'RomFS'; self.src.mkdir()
         self.dst = self.root / 'romfs.img'
 
+    def test_symlink_is_not_packed(self):
+        secret = self.root / 'secret'
+        secret.write_bytes(b'secret-bytes')
+        (self.src / 'link').symlink_to(secret)
+        (self.src / 'a').write_bytes(b'ok')
+        outside = self.root / 'outside'
+        outside.mkdir(); (outside / 'hidden').write_bytes(b'hidden')
+        (self.src / 'sub').symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(RuntimeError, 'symlink'): image.pack(self.src, self.dst)
+        self.assertFalse(self.dst.exists())
+        self.assertFalse(Path(str(self.dst) + '.part').exists())
+        self.assertEqual(secret.read_bytes(), b'secret-bytes')
+        self.assertEqual((outside / 'hidden').read_bytes(), b'hidden')
+
     def valid(self):
         return subprocess.run([str(self.validator), str(self.dst)]).returncode == 0
 

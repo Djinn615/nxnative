@@ -41,7 +41,23 @@ class Pfs0StorageTests {
         byte[] all = new byte[(int)size]; storage.Read(0, all).ThrowIfFailure();
         Check(all.AsSpan(all.Length - 6).SequenceEqual(new byte[] {1, 2, 3, 4, 5, 6}));
     }
+    static void SafePaths() {
+        string root = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "nx-safe-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try {
+            string ok = P.SafeChild(root, "/ExeFS/main");
+            Check(ok == System.IO.Path.GetFullPath(System.IO.Path.Combine(root, "ExeFS", "main")));
+            string inside = P.SafeChild(root, "/etc/passwd");
+            Check(inside == System.IO.Path.GetFullPath(System.IO.Path.Combine(root, "etc", "passwd")));
+            Check(inside.StartsWith(System.IO.Path.GetFullPath(root) + System.IO.Path.DirectorySeparatorChar, StringComparison.Ordinal));
+            foreach (string bad in new[] { "../x", "/../x", "a/../../x", "a/../b", "..", ".", "", "a/./b", "foo\0bar", "a\\..\\b", "C:/Windows/x", "a/\n/b" }) {
+                try { P.SafeChild(root, bad); throw new Exception("accepted " + bad.Replace("\0", "\\0").Replace("\n", "\\n")); }
+                catch (IOException) { }
+            }
+        } finally { Directory.Delete(root, true); }
+    }
     static void Main() {
+        SafePaths();
         ReadPackage(true); ReadPackage(false);
         byte[] empty = new byte[16]; "PFS0"u8.CopyTo(empty);
         using (var storage = new MemoryStorage(empty)) Check(ReferenceEquals(storage, P.PackageStorage(storage)));

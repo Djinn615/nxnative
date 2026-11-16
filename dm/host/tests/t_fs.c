@@ -277,11 +277,23 @@ int main(void) {
         snprintf(victim, sizeof victim, "%s/victim", root); mkdir(victim, 0755); snprintf(vf, sizeof vf, "%s/keep", victim); put(vf, "keep");
         CHECK(h_fs_CreateDirectory("save:/d") == RES_OK, "create save:/d");
         snprintf(lnk, sizeof lnk, "%s/d/lnk", work); CHECK(symlink(victim, lnk) == 0, "a symlink to a directory outside the save inside save:/d");
+        { uint64_t dh = 0; char secret[1200], flink[1200];
+          CHECK(h_fs_OpenDirectory(&dh, "save:/d/lnk", DIRMODE_DIR | DIRMODE_FILE) != RES_OK && same(vf, "keep"), "opening the directory symlink does not list its target");
+          snprintf(secret, sizeof secret, "%s/secret", victim); put(secret, "secret"); snprintf(flink, sizeof flink, "%s/d/file", work); CHECK(symlink(secret, flink) == 0, "a symlink to a file outside the save");
+          CHECK(!read_fs("save:/d/file", got, sizeof got) && same(secret, "secret"), "opening the file symlink does not read or change its target"); }
         CHECK(h_fs_DeleteDirRec("save:/d") == RES_OK && access(lnk, F_OK) && same(vf, "keep"), "DeleteDirectoryRecursively removes the symlink, not its target's files");
         CHECK(h_fs_CreateDirectory("save:/d") == RES_OK && symlink(victim, lnk) == 0, "the same again in a new save:/d");
         CHECK(h_fs_CleanDirRec("save:/d") == RES_OK && access(lnk, F_OK) && same(vf, "keep"), "CleanDirectoryRecursively removes the symlink, not its target's files");
         snprintf(lnk, sizeof lnk, "%s/lnk2", root); symlink(victim, lnk); errno = 0;
         CHECK(rm_tree(lnk) == -1 && errno == ENOTDIR && same(vf, "keep"), "rm_tree of a symlink to a directory refuses it (ENOTDIR) and leaves the target alone");
+        char rsym[1100], secret[1200], real[1200]; const char *prev_rom = getenv("DM_ROMFS");
+        snprintf(rsym, sizeof rsym, "%s/romsym", root); snprintf(secret, sizeof secret, "%s/secret", victim); snprintf(real, sizeof real, "%s/real", rsym);
+        mkdir(rsym, 0755); put(secret, "secret"); put(real, "inside");
+        snprintf(lnk, sizeof lnk, "%s/link", rsym); CHECK(symlink(secret, lnk) == 0, "a symlink inside a RomFS folder");
+        setenv("DM_ROMFS", rsym, 1); unsetenv("DM_ROMFS_OVERLAY");
+        CHECK(h_fs_MountRom("romfiles", NULL, 0) == RES_OK && read_fs("romfiles:/real", got, sizeof got) && !strcmp(got, "inside"), "a folder RomFS still reads a real file");
+        CHECK(!read_fs("romfiles:/link", got, sizeof got) && same(secret, "secret"), "a symlink in that folder is not followed (the read-only name index too)");
+        if (prev_rom) setenv("DM_ROMFS", prev_rom, 1);
     }
 
     {   // Unmount follows who holds the mount: the host's table is permanent, the SDK's entry is released in the SDK, so the name can be mounted again
